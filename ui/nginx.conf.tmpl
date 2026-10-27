@@ -1,0 +1,38 @@
+# Template: __API_UPSTREAM__ and __APP_TITLE__ are filled in at container start
+# from the API_UPSTREAM and APP_TITLE env vars (see Dockerfile).
+# Runs as a random non-root UID on OpenShift: listen on 8080, write only to /tmp.
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+events { worker_connections 1024; }
+
+http {
+  include /etc/nginx/mime.types;
+  access_log /dev/stdout;
+  client_body_temp_path /tmp/client_body;
+  proxy_temp_path       /tmp/proxy;
+  fastcgi_temp_path     /tmp/fastcgi;
+  uwsgi_temp_path       /tmp/uwsgi;
+  scgi_temp_path        /tmp/scgi;
+
+  server {
+    listen 8080;
+    root /opt/app-root/src;
+    index index.html;
+
+    # Same-origin proxy to the API Service inside the cluster (no CORS needed).
+    location /api/ {
+      proxy_pass http://__API_UPSTREAM__;
+      proxy_connect_timeout 2s;
+      proxy_read_timeout 10s;
+    }
+
+    # Runtime settings for the Vue app
+    location = /config.json {
+      default_type application/json;
+      return 200 '{"title":"__APP_TITLE__","upstream":"__API_UPSTREAM__"}';
+    }
+
+    location / { try_files $uri $uri/ /index.html; }
+  }
+}
