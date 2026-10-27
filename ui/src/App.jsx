@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
 const idr = n => 'Rp ' + Math.round(n).toLocaleString('id-ID')
 
@@ -111,70 +111,79 @@ function Applications({ refreshKey }) {
 // ------------------------------------------------------- health monitor
 function HealthMonitor() {
   const [running, setRunning] = useState(false)
-  const [checks, setChecks] = useState([]) // {ok, ms, pod, status}
+  const [checks, setChecks] = useState([])   // last 120 requests, for the timeline only
+  const empty = { total: 0, ok: 0, msSum: 0, streak: 0, worst: 0, worstAt: null, outages: 0, since: null, pods: {} }
+  const [session, setSession] = useState(empty) // whole session since Start/Clear
   const timer = useRef(null)
   const tick = useRef(0)
 
   useEffect(() => {
     if (!running) return
+    setSession(s => s.since ? s : { ...s, since: new Date() })
     timer.current = setInterval(async () => {
       tick.current++
       const r = tick.current % 2
         ? await api('GET', '/api/products')
         : await api('POST', '/api/simulate', { product: 'KUR', amount: 25000000, tenor_months: 12 })
-      setChecks(c => [...c.slice(-119), { ok: r.ok, ms: r.ms, pod: r.pod, status: r.status }])
+      const at = new Date()
+      setChecks(c => [...c.slice(-119), { ok: r.ok, ms: r.ms, pod: r.pod, status: r.status, at }])
+      setSession(s => {
+        const streak = r.ok ? 0 : s.streak + 1
+        const pods = r.ok ? { ...s.pods, [r.pod]: (s.pods[r.pod] || 0) + 1 } : s.pods
+        return {
+          ...s,
+          total: s.total + 1,
+          ok: s.ok + (r.ok ? 1 : 0),
+          msSum: s.msSum + r.ms,
+          streak,
+          outages: s.outages + (!r.ok && s.streak === 0 ? 1 : 0),
+          worst: Math.max(s.worst, streak),
+          worstAt: streak > s.worst ? at : s.worstAt,
+          pods
+        }
+      })
     }, 500)
     return () => clearInterval(timer.current)
   }, [running])
 
-  const stats = useMemo(() => {
-    if (!checks.length) return null
-    const ok = checks.filter(c => c.ok)
-    const pods = {}
-    ok.forEach(c => { pods[c.pod] = (pods[c.pod] || 0) + 1 })
-    // longest run of consecutive failures, at 500 ms per check
-    let worst = 0, cur = 0
-    checks.forEach(c => { cur = c.ok ? 0 : cur + 1; worst = Math.max(worst, cur) })
-    return {
-      availability: ((ok.length / checks.length) * 100).toFixed(1),
-      avg: Math.round(checks.reduce((s, c) => s + c.ms, 0) / checks.length),
-      outageSec: (worst * 0.5).toFixed(1),
-      pods
-    }
-  }, [checks])
+  const clear = () => { setChecks([]); setSession({ ...empty, since: running ? new Date() : null }) }
+  const availability = session.total ? (session.ok / session.total) * 100 : null
+  const t = d => d ? d.toLocaleTimeString() : ''
 
   return (
     <section className="card monitor">
       <div className="monitor-head">
         <div>
           <h2>Customer experience monitor</h2>
-          <p className="hint">Simulates customers using the portal twice a second. Run it while Krkn breaks things.</p>
+          <p className="hint">Simulates customers using the portal twice a second. Run it while Krkn breaks things.
+            {session.since && <> Session started {t(session.since)}.</>}</p>
         </div>
         <div className="actions">
           <button className={running ? 'danger' : 'primary'} onClick={() => setRunning(r => !r)}>
             {running ? 'Stop traffic' : 'Start traffic'}
           </button>
-          <button onClick={() => setChecks([])} disabled={!checks.length}>Clear</button>
+          <button onClick={clear} disabled={!session.total}>Clear</button>
         </div>
       </div>
 
       <div className="timeline" aria-label="Last 120 requests: green ok, red failed">
         {checks.map((c, i) => (
           <span key={i} className={c.ok ? (c.ms > 1000 ? 'slow' : 'ok') : 'fail'}
-                title={`${c.status} · ${c.ms} ms · ${c.pod}`} />
+                title={`${t(c.at)} · ${c.status} · ${c.ms} ms · ${c.pod}`} />
         ))}
-        {!checks.length && <p className="empty">Each square is one customer request: green OK, amber slower than 1 s, red failed.</p>}
+        {!checks.length && <p className="empty">Each square is one customer request (last 60 s shown): green OK, amber slower than 1 s, red failed.</p>}
       </div>
 
-      {stats && (
+      {session.total > 0 && (
         <>
           <dl className="stats">
-            <div><dt>Availability</dt><dd className={Number(stats.availability) < 100 ? 'bad' : ''}>{stats.availability}%</dd></div>
-            <div><dt>Avg response</dt><dd>{stats.avg} ms</dd></div>
-            <div><dt>Longest outage</dt><dd className={Number(stats.outageSec) > 0 ? 'bad' : ''}>{stats.outageSec} s</dd></div>
-            <div><dt>Requests</dt><dd>{checks.length}</dd></div>
+            <div><dt>Availability (session)</dt><dd className={availability < 100 ? 'bad' : ''}>{availability.toFixed(1)}%</dd></div>
+            <div><dt>Avg response</dt><dd>{Math.round(session.msSum / session.total)} ms</dd></div>
+            <div><dt>Longest outage</dt><dd className={session.worst ? 'bad' : ''}>{(session.worst * 0.5).toFixed(1)} s</dd>
+              {session.worstAt && <small>ended ~{t(session.worstAt)}</small>}</div>
+            <div><dt>Outages / requests</dt><dd className={session.outages ? 'bad' : ''}>{session.outages} / {session.total}</dd></div>
           </dl>
-          <p className="pods">Served by: {Object.entries(stats.pods).map(([p, n]) => <code key={p}>{p} ({n})</code>)}</p>
+          <p className="pods">Served by: {Object.entries(session.pods).map(([p, n]) => <code key={p}>{p} ({n})</code>)}</p>
         </>
       )}
     </section>
